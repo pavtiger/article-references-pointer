@@ -1,14 +1,16 @@
 import os
+import math
 import numpy as np
 import fitz
 import urllib.request
 from tqdm import tqdm
+from colour import Color
 
 # ML
 from transformers import pipeline
 
 # Local files
-from config import articles_to_cache
+from config import articles_to_cache, highlight_n, topk, k, eps_input, eps_ref
 
 # Supress warnings
 import warnings
@@ -39,7 +41,7 @@ def get_references(prefix_path, arxiv_id):
 
         elif len(references) > 0:
             references[-1][1] += " " + sentence
-            
+
 
     # Reverse references and iterate from end until 1
     references = references[::-1]
@@ -72,7 +74,7 @@ def get_references(prefix_path, arxiv_id):
     return reference_arxiv_ids[::-1]
 
 
-def cache_article(prefix_path, arxiv_id, article_name="None", eps=2, step_size=2):
+def cache_article(prefix_path, arxiv_id, article_name="None", step_size=2):
     article_folder = os.path.join(prefix_path, arxiv_id)
     if os.path.exists(article_folder):
         print(f"Article {article_name}:{arxiv_id} already cached")
@@ -92,7 +94,7 @@ def cache_article(prefix_path, arxiv_id, article_name="None", eps=2, step_size=2
     # Prepare summaries
     summaries = []
     for ind in tqdm(range(0, len(sentences), step_size)):
-        sent_slice = sentences[max(0, ind - eps):min(len(sentences) - 1, ind + eps)]
+        sent_slice = sentences[max(0, ind - eps_ref):min(len(sentences) - 1, ind + eps_ref)]
         if len(". ".join(sent_slice)) < 100:
             continue
 
@@ -112,9 +114,141 @@ def cache_articles():
     for article_name in articles_to_cache:
         arxiv_id = articles_to_cache[article_name]
         cache_article(cache_path, arxiv_id, article_name)
-        
-        ref_ids = get_references(cache_path, arxiv_id)[:2]
+
+        ref_ids = get_references(cache_path, arxiv_id)[:3]
         for ref_arxiv_id in ref_ids:
             if ref_arxiv_id != "":
                 cache_article(cache_path, ref_arxiv_id)
+
+
+def predict_document(arxiv_id, cache_path, pdf_folder):
+    reference_number = 3
+    arxiv_ref_id = get_references(cache_path, arxiv_id)[reference_number - 1]
+    # print(arxiv_ref_id)
+    ref_cache_path = os.path.join(cache_path, arxiv_ref_id)
+
+    document_ref = os.path.join(ref_cache_path, "article.pdf")
+    doc_path = os.path.join(cache_path, arxiv_id, "article.pdf")
+
+    # Create output directory
+    highlight_path = os.path.join(pdf_folder, arxiv_id)
+    if os.path.exists(highlight_path):
+        return
+    os.mkdir(highlight_path)
+
+    from sentence_transformers import SentenceTransformer
+    model_paperswithcode_word2vec = SentenceTransformer('lambdaofgod/paperswithcode_word2vec')
+
+    red = Color("red")
+    grad_colors = list(red.range_to(Color("yellow"), 11))
+
+    # Read pdf's sentences
+    with fitz.open(doc_path) as doc:  # Open document
+        text_ref = "\n".join([page.get_text().lower() for page in doc])
+    sentences = text_ref.replace('\n', ' ').split('. ')
+
+    with fitz.open(document_ref) as doc:  # open document
+        text = "\n".join([page.get_text().lower() for page in doc])
+    sentences_ref = text.replace('\n', ' ').split('. ')
+
+    # Read cached summaries
+    summaries_on_ref = np.load(os.path.join(ref_cache_path, "summaries.npy"))
+    print(len(summaries_on_ref), summaries_on_ref[0])
+
+
+    for ind, sentence in enumerate(sentences):
+        if "[" in sentence and len(sentence.split("[")[1]) > 1 and "]" in sentence.split("[")[1]:
+            text_in = sentence.split("[")[1].split("]")[0]
+            if text_in.isnumeric() and int(text_in) == reference_number:  # Reference number
+
+                # Check input window size
+                print(sentence)
+                main_sent_embedding = model_paperswithcode_word2vec.encode(sentence)
+
+                sent_dists = []
+                for s in sentences[max(0, ind - eps_input):min(len(sentences) - 1, ind + eps_input)]:
+                    curr_embedding = model_paperswithcode_word2vec.encode(s)
+                    d = np.linalg.norm(main_sent_embedding - curr_embedding)
+                    sent_dists.append(d)
+
+                sent_indexes = np.argsort(sent_dists)
+                sent_slice = []
+                for chosen_ind in sent_indexes[:topk]:
+                    sent_slice.append((
+                        max(0, ind - eps_input) + chosen_ind,
+                        sentences[max(0, ind - eps_input) + chosen_ind]
+                    ))
+
+                sent_slice = [elem[1] for elem in sorted(sent_slice)]
+
+                avg = sum(sent_dists) / len(sent_dists)
+                median = np.median(np.array(sent_dists))
+
+                # Count input window's embedding
+                print(text_in, ind, "||", sent_slice, '\n')
+                summary = summarizer(". ".join(sent_slice), max_length=100)[0]["summary_text"]
+                print("SUMMARY: ", summary)
+                embedding = model_paperswithcode_word2vec.encode(summary)
+
+
+                # Iterate over reference paper
+                s_ind = 0
+                dists = []
+                ind_map = dict()
+                for ind_ref in tqdm(range(0, len(sentences_ref), 2)):
+                    sent_ref = sentences_ref[ind_ref]
+                    sent_slice_ref = sentences_ref[max(0, ind_ref - eps_ref):min(len(sentences_ref) - 1, ind_ref + eps_ref)]
+
+                    if len(". ".join(sent_slice_ref)) < 100:
+                        continue
+
+                    summary_ref = summaries_on_ref[s_ind]
+                    s_ind += 1
+                    embedding_ref = model_paperswithcode_word2vec.encode(summary_ref)
+
+                    dist = np.linalg.norm(embedding - embedding_ref)
+                    ind_map[len(dists)] = ind_ref
+                    dists.append(dist)
+
+
+                indices = np.argsort(dists)
+                selected_inds = list()
+                best_conf = dists[indices[0]]
+
+                # Highlight example
+                with fitz.open(document_ref) as doc:  # open document
+                    for close_ind in indices:
+                        # Print only distances that are far from each other in text
+                        sents = np.abs(np.asarray(selected_inds) - close_ind)
+                        if len(sents) != 0:
+                            min_dist = sents.min()
+                            if min_dist < 5:
+                                continue
+
+                        slice_ans = sentences_ref[max(0, ind_map[close_ind] - eps_ref):min(len(sentences_ref) - 1, ind_map[close_ind] + eps_ref)]
+                        selected_inds.append(close_ind)
+                        loaded_text = "\n".join([page.get_text() for page in doc]).replace('\n', ' ').replace("- ", "").split('. ')
+                        all_sentences = loaded_text[max(0, ind_map[close_ind] - eps_ref):min(len(sentences_ref) - 1, ind_map[close_ind] + eps_ref)]
+
+                        conf = dists[close_ind]
+                        color_ind = min(10, int(math.sqrt(conf - best_conf) * 6))
+                        print(dists[close_ind], color_ind)
+                        # print(dists[close_ind], slice_ans)
+
+                        for highlight_text in all_sentences:
+                            for page in doc:
+                                text_instances = page.search_for(highlight_text)
+
+                                # Highlight
+                                for inst in text_instances:
+                                    highlight = page.add_highlight_annot(inst)
+                                    highlight.set_colors({"stroke": grad_colors[color_ind].rgb})
+                                    highlight.update()
+
+
+                        if len(selected_inds) == highlight_n:
+                            doc.save(os.path.join(highlight_path, f"{arxiv_ref_id}_{ind}.pdf"), garbage=4, deflate=True, clean=True)
+                            break
+
+                print()
 

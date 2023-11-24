@@ -1,11 +1,12 @@
-from threading import Thread
+import os
 import time
+from threading import Thread
 
 import eventlet
 from flask import Flask, send_from_directory, render_template
 
 from config import ip_address, port
-from ml import cache_articles
+from ml import cache_articles, predict_document
 
 
 # Init app
@@ -34,12 +35,14 @@ def game_loop(name):
 
 
 if __name__ == "__main__":
-    # This code and game_loop() are needed if you want to do wome tasks in background of the app (e.g. collision check)
-
     # x = Thread(target=game_loop, args=(1,))
     # x.start()
 
+    cache_folder = os.path.join("static", "cache")
+    pdf_folder = os.path.join("static", "pdf")
+
     cache_articles()
+    predict_document("1706.03762", cache_folder, pdf_folder)
 
     app.run(host=ip_address, port=port)
 

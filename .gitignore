@@ -162,4 +162,5 @@ cython_debug/
 # Custom
 config.py
 static/cache
+static/pdf
 
