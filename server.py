@@ -3,7 +3,7 @@ import time
 from threading import Thread
 
 import eventlet
-from flask import Flask, send_from_directory, render_template
+from flask import Flask, send_from_directory, render_template, request, redirect
 
 from config import ip_address, port
 from ml import cache_articles, predict_document
@@ -18,6 +18,16 @@ app = Flask(__name__, static_url_path='')
 @app.route('/')
 def root():
     return render_template('index.html')
+
+
+# Main process block of pdf file
+@app.route('/process')
+def process():
+    arxiv_id = request.args.get('arxiv_id')
+    print(arxiv_id)
+    predict_document(arxiv_id, cache_folder, pdf_folder)
+
+    return redirect(f"http://papers.pavtiger.com/pdf/{arxiv_id}/main.pdf", code=302)
 
 
 # Get files from server (e.g libs)
@@ -42,7 +52,7 @@ if __name__ == "__main__":
     pdf_folder = os.path.join("static", "pdf")
 
     cache_articles()
-    predict_document("1706.03762", cache_folder, pdf_folder)
+    # predict_document("1706.03762", cache_folder, pdf_folder)
 
     app.run(host=ip_address, port=port)
 

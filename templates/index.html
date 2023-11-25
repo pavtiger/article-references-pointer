@@ -11,6 +11,13 @@
     </head>
 
     <body>
-        <img src="icon.png" alt="Image">
+        <form action="/process">
+            <label for="articles">Choose from suggested articles</label>
+            <select name="arxiv_id" id="articles">
+                <option value="1706.03762">Attention Is All You Need</option>
+            </select>
+            <br><br>
+            <input type="submit" value="Submit">
+        </form>        
     </body>
 </html>

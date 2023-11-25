@@ -8,6 +8,7 @@ from colour import Color
 
 # ML
 from transformers import pipeline
+import torch
 
 # Local files
 from config import articles_to_cache, highlight_n, topk, k, eps_input, eps_ref
@@ -19,6 +20,7 @@ warnings.filterwarnings("ignore")
 
 # Setup
 summarizer = pipeline("summarization", model="stevhliu/my_awesome_billsum_model")
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 
 def get_references(prefix_path, arxiv_id):
@@ -115,54 +117,71 @@ def cache_articles():
         arxiv_id = articles_to_cache[article_name]
         cache_article(cache_path, arxiv_id, article_name)
 
-        ref_ids = get_references(cache_path, arxiv_id)[:3]
-        for ref_arxiv_id in ref_ids:
+        ref_ids = get_references(cache_path, arxiv_id)
+        for r_ind, ref_arxiv_id in enumerate(ref_ids):
             if ref_arxiv_id != "":
+                print(f"{r_ind + 1} / {len(ref_ids)}")
                 cache_article(cache_path, ref_arxiv_id)
 
 
 def predict_document(arxiv_id, cache_path, pdf_folder):
-    reference_number = 3
-    arxiv_ref_id = get_references(cache_path, arxiv_id)[reference_number - 1]
-    # print(arxiv_ref_id)
-    ref_cache_path = os.path.join(cache_path, arxiv_ref_id)
-
-    document_ref = os.path.join(ref_cache_path, "article.pdf")
-    doc_path = os.path.join(cache_path, arxiv_id, "article.pdf")
-
     # Create output directory
     highlight_path = os.path.join(pdf_folder, arxiv_id)
     if os.path.exists(highlight_path):
         return
     os.mkdir(highlight_path)
 
-    from sentence_transformers import SentenceTransformer
-    model_paperswithcode_word2vec = SentenceTransformer('lambdaofgod/paperswithcode_word2vec')
 
-    red = Color("red")
-    grad_colors = list(red.range_to(Color("yellow"), 11))
+    all_doc_references = get_references(cache_path, arxiv_id)
+    all_line_ref_indexes = []
+    for reference_number in range(1, len(all_doc_references) + 1):
+        print(f"Starting reference {reference_number} / {len(all_doc_references)}")
+        all_line_ref_indexes.append(list())
+        arxiv_ref_id = all_doc_references[reference_number - 1]
+        if arxiv_ref_id == "":
+            print("No link")
+            continue  # No link found
 
-    # Read pdf's sentences
-    with fitz.open(doc_path) as doc:  # Open document
-        text_ref = "\n".join([page.get_text().lower() for page in doc])
-    sentences = text_ref.replace('\n', ' ').split('. ')
+        ref_cache_path = os.path.join(cache_path, arxiv_ref_id)
 
-    with fitz.open(document_ref) as doc:  # open document
-        text = "\n".join([page.get_text().lower() for page in doc])
-    sentences_ref = text.replace('\n', ' ').split('. ')
+        document_ref = os.path.join(ref_cache_path, "article.pdf")
+        doc_path = os.path.join(cache_path, arxiv_id, "article.pdf")
 
-    # Read cached summaries
-    summaries_on_ref = np.load(os.path.join(ref_cache_path, "summaries.npy"))
-    print(len(summaries_on_ref), summaries_on_ref[0])
+        from sentence_transformers import SentenceTransformer
+        model_paperswithcode_word2vec = SentenceTransformer('lambdaofgod/paperswithcode_word2vec', device="cuda")
 
+        red = Color("red")
+        grad_colors = list(red.range_to(Color("yellow"), 11))
 
-    for ind, sentence in enumerate(sentences):
-        if "[" in sentence and len(sentence.split("[")[1]) > 1 and "]" in sentence.split("[")[1]:
-            text_in = sentence.split("[")[1].split("]")[0]
-            if text_in.isnumeric() and int(text_in) == reference_number:  # Reference number
+        # Read pdf's sentences
+        with fitz.open(doc_path) as doc:  # Open document
+            text_ref = "\n".join([page.get_text().lower() for page in doc])
+        sentences = text_ref.replace('\n', ' ').split('. ')
 
+        with fitz.open(document_ref) as doc:  # open document
+            text = "\n".join([page.get_text().lower() for page in doc])
+        sentences_ref = text.replace('\n', ' ').split('. ')
+
+        # Read cached summaries
+        summaries_on_ref = np.load(os.path.join(ref_cache_path, "summaries.npy"))
+
+        for ind, sentence in enumerate(sentences):
+            if "[" not in sentence:
+                continue
+            
+            # Iterate over all [x] in current row and search for the one we need
+            found_reference = 0
+            for elem in sentence.split("[")[1:]:
+                if "]" not in elem:
+                    continue
+
+                text_in = elem.split("]")[0]
+                if text_in.isnumeric() and int(text_in) == reference_number:
+                    found_reference += 1
+
+            if found_reference > 0:
                 # Check input window size
-                print(sentence)
+                print("--", sentence, "--")
                 main_sent_embedding = model_paperswithcode_word2vec.encode(sentence)
 
                 sent_dists = []
@@ -185,9 +204,9 @@ def predict_document(arxiv_id, cache_path, pdf_folder):
                 median = np.median(np.array(sent_dists))
 
                 # Count input window's embedding
-                print(text_in, ind, "||", sent_slice, '\n')
+                # print(text_in, ind, "||", sent_slice, '\n')
                 summary = summarizer(". ".join(sent_slice), max_length=100)[0]["summary_text"]
-                print("SUMMARY: ", summary)
+                print(reference_number, "SUMMARY: ", summary)
                 embedding = model_paperswithcode_word2vec.encode(summary)
 
 
@@ -195,7 +214,7 @@ def predict_document(arxiv_id, cache_path, pdf_folder):
                 s_ind = 0
                 dists = []
                 ind_map = dict()
-                for ind_ref in tqdm(range(0, len(sentences_ref), 2)):
+                for ind_ref in range(0, len(sentences_ref), 2):
                     sent_ref = sentences_ref[ind_ref]
                     sent_slice_ref = sentences_ref[max(0, ind_ref - eps_ref):min(len(sentences_ref) - 1, ind_ref + eps_ref)]
 
@@ -232,12 +251,13 @@ def predict_document(arxiv_id, cache_path, pdf_folder):
 
                         conf = dists[close_ind]
                         color_ind = min(10, int(math.sqrt(conf - best_conf) * 6))
-                        print(dists[close_ind], color_ind)
-                        # print(dists[close_ind], slice_ans)
+                        # print(dists[close_ind], color_ind)
 
                         for highlight_text in all_sentences:
                             for page in doc:
                                 text_instances = page.search_for(highlight_text)
+                                if text_instances is None:
+                                    continue
 
                                 # Highlight
                                 for inst in text_instances:
@@ -248,7 +268,32 @@ def predict_document(arxiv_id, cache_path, pdf_folder):
 
                         if len(selected_inds) == highlight_n:
                             doc.save(os.path.join(highlight_path, f"{arxiv_ref_id}_{ind}.pdf"), garbage=4, deflate=True, clean=True)
+                            for i in range(found_reference):
+                                all_line_ref_indexes[reference_number - 1].append(ind)
                             break
 
-                print()
+                    print()
+
+
+    # Insert link
+    with fitz.open(doc_path) as main_doc:  # open document
+        for reference_number in range(1, len(all_doc_references) + 1):
+            arxiv_ref_id = all_doc_references[reference_number - 1]
+            if arxiv_ref_id == "":
+                continue
+
+            occurance_ind = 0
+            for page_index, page in enumerate(main_doc):
+                # all_links = page.get_links()
+                # for link in all_links:
+                #     page.delete_link(link)
+
+                text_instances = page.search_for(f"[{reference_number}]")
+                for inst in text_instances:
+                    uri = f"http://papers.pavtiger.com/pdf/{arxiv_id}/{arxiv_ref_id}_{all_line_ref_indexes[reference_number - 1][occurance_ind]}.pdf"
+                    print(uri)
+                    page.insert_link({"kind": fitz.LINK_URI, 'from': fitz.Rect(inst.x0, inst.y0, inst.x1, inst.y1), "uri": uri})
+                    occurance_ind += 1
+
+        main_doc.save(os.path.join(highlight_path, f"main.pdf"), garbage=4, deflate=True, clean=True)
 
