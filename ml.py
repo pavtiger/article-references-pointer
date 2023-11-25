@@ -165,6 +165,21 @@ def predict_document(arxiv_id, cache_path, pdf_folder):
         # Read cached summaries
         summaries_on_ref = np.load(os.path.join(ref_cache_path, "summaries.npy"))
 
+        # Pre count embeddings in ref
+        s_ind = 0
+        embeddings_ref = []
+        for ind_ref in range(0, len(sentences_ref), 2):
+            sent_ref = sentences_ref[ind_ref]
+            sent_slice_ref = sentences_ref[max(0, ind_ref - eps_ref):min(len(sentences_ref) - 1, ind_ref + eps_ref)]
+
+            if len(". ".join(sent_slice_ref)) < 100:
+                continue
+
+            summary_ref = summaries_on_ref[s_ind]
+            s_ind += 1
+            embeddings_ref.append(model_paperswithcode_word2vec.encode(summary_ref))
+
+
         for ind, sentence in enumerate(sentences):
             if "[" not in sentence:
                 continue
@@ -204,7 +219,6 @@ def predict_document(arxiv_id, cache_path, pdf_folder):
                 median = np.median(np.array(sent_dists))
 
                 # Count input window's embedding
-                # print(text_in, ind, "||", sent_slice, '\n')
                 summary = summarizer(". ".join(sent_slice), max_length=100)[0]["summary_text"]
                 print(reference_number, "SUMMARY: ", summary)
                 embedding = model_paperswithcode_word2vec.encode(summary)
@@ -221,11 +235,8 @@ def predict_document(arxiv_id, cache_path, pdf_folder):
                     if len(". ".join(sent_slice_ref)) < 100:
                         continue
 
-                    summary_ref = summaries_on_ref[s_ind]
+                    dist = np.linalg.norm(embedding - embeddings_ref[s_ind])
                     s_ind += 1
-                    embedding_ref = model_paperswithcode_word2vec.encode(summary_ref)
-
-                    dist = np.linalg.norm(embedding - embedding_ref)
                     ind_map[len(dists)] = ind_ref
                     dists.append(dist)
 
@@ -251,7 +262,6 @@ def predict_document(arxiv_id, cache_path, pdf_folder):
 
                         conf = dists[close_ind]
                         color_ind = min(10, int(math.sqrt(conf - best_conf) * 6))
-                        # print(dists[close_ind], color_ind)
 
                         for highlight_text in all_sentences:
                             for page in doc:
